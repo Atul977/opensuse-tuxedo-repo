@@ -1,0 +1,7 @@
+[tuxedo-repo]
+name=Tuxedo Hardware Repo (Atul977)
+enabled=1
+autorefresh=1
+baseurl=https://atul977.github.io/OpenSuse-Tuxedo-Repo/
+type=rpm-md
+gpgcheck=0
