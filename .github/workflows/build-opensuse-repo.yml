@@ -1,0 +1,104 @@
+name: openSUSE Smart Repo Builder
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    container: opensuse/tumbleweed
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Build Dependencies
+        run: |
+          zypper refresh
+          zypper install -y rpm-build createrepo cargo rust meson ninja desktop-file-utils "pkgconfig(gtk4)" "pkgconfig(libadwaita-1)" gettext-devel wget tar unzip git
+
+      - name: Prepare RPM Build Environment
+        run: |
+          # ---> NEW: Tell openSUSE rpmbuild to use our custom folder <---
+          echo '%_topdir %(echo $HOME)/rpmbuild' > ~/.rpmmacros
+          
+          mkdir -p ~/rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+          
+          # Move specs into place
+          cp tuxedo-rs.spec ~/rpmbuild/SPECS/
+          cp tuxedo-drivers-dkms.spec ~/rpmbuild/SPECS/
+          
+          # Move custom files to SOURCES
+          cp fixed_color_button.rs ~/rpmbuild/SOURCES/
+          cp tuxedo-drivers.dkms ~/rpmbuild/SOURCES/
+
+      - name: Download Upstream Sources
+        run: |
+          # Download tuxedo-rs v0.2.5 source
+          wget https://github.com/AaronErhardt/tuxedo-rs/archive/refs/tags/tailord-v0.2.5.tar.gz -O ~/rpmbuild/SOURCES/tuxedo-rs-0.2.5.tar.gz
+          
+          # Download your tuxedo-drivers main branch zip
+          wget https://github.com/Atul977/tuxedo-drivers/archive/refs/heads/main.zip -O ~/rpmbuild/SOURCES/main.zip
+
+      - name: Build RPM Packages
+        run: |
+          # Build both packages natively (Cargo will fetch dependencies from crates.io automatically)
+          rpmbuild -ba ~/rpmbuild/SPECS/tuxedo-drivers-dkms.spec
+          rpmbuild -ba ~/rpmbuild/SPECS/tuxedo-rs.spec
+
+      - name: Organize Repo and Create Database
+        run: |
+          mkdir -p staging/x86_64
+          mkdir -p staging/noarch
+          
+          cp ~/rpmbuild/RPMS/x86_64/*.rpm staging/x86_64/ || true
+          cp ~/rpmbuild/RPMS/noarch/*.rpm staging/noarch/ || true
+          
+          createrepo staging/
+          
+          # Generate the .repo file for zypper
+          cat <<EOF > staging/tuxedo.repo
+          [tuxedo-repo]
+          name=Tuxedo Hardware Repo (Atul977)
+          enabled=1
+          autorefresh=1
+          baseurl=https://atul977.github.io/OpenSuse-Tuxedo-Repo/
+          type=rpm-md
+          gpgcheck=0
+          EOF
+
+          # 1. Generate the main HTML index (Root level)
+          cd staging
+          echo "<html><body style='background:#121212;color:#eee;font-family:sans-serif;padding:40px;'>" > index.html
+          echo "<h1>openSUSE Tuxedo Repo</h1><hr><ul>" >> index.html
+          echo "<li><a href='x86_64/' style='color:#00adb5;'>x86_64 Packages</a></li>" >> index.html
+          echo "<li><a href='noarch/' style='color:#00adb5;'>noarch Packages</a></li>" >> index.html
+          echo "<li><a href='tuxedo.repo' style='color:#00adb5;'>tuxedo.repo (zypper config)</a></li>" >> index.html
+          echo "</ul><hr><p>Updated: $(date)</p></body></html>" >> index.html
+
+          # 2. Generate HTML indexes for the subfolders
+          for dir in x86_64 noarch; do
+            echo "<html><body style='background:#121212;color:#eee;font-family:sans-serif;padding:40px;'>" > $dir/index.html
+            echo "<h1>$dir Packages</h1><hr><ul>" >> $dir/index.html
+            echo "<li><a href='../' style='color:#00adb5;'>../ (Parent Directory)</a></li>" >> $dir/index.html
+            
+            # Loop through any RPMs and create a link for them
+            for rpm in $dir/*.rpm; do
+              if [ -e "$rpm" ]; then
+                filename=$(basename "$rpm")
+                echo "<li><a href='$filename' style='color:#00adb5;'>$filename</a></li>" >> $dir/index.html
+              fi
+            done
+            
+            echo "</ul><hr></body></html>" >> $dir/index.html
+          done
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./staging
+          publish_branch: gh-pages
